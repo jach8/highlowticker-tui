@@ -25,6 +25,10 @@ class YahooFinanceProvider:
         self._volume_spikes: Dict[str, float] = {}
         # NOTE: _poll() must only be called from a single executor at a time.
         # _high_timestamps and _low_timestamps are not thread-safe for concurrent mutation.
+        # Rate-limit backoff state
+        self._backoff_until: float = 0.0
+        self._backoff_secs: float = 5.0
+        self._semaphore = asyncio.Semaphore(3)
 
     async def connect(self) -> None:
         pass  # no persistent connection needed for polling
@@ -53,16 +57,37 @@ class YahooFinanceProvider:
             "is_realtime": False,
         }
 
+    def _mark_rate_limited(self) -> None:
+        """Called on HTTP 429. Doubles backoff, caps at 60s."""
+        self._backoff_until = time.time() + self._backoff_secs
+        self._backoff_secs = min(self._backoff_secs * 2, 60.0)
+
+    def is_rate_limited(self) -> bool:
+        return time.time() < self._backoff_until
+
+    def _reset_backoff(self) -> None:
+        self._backoff_secs = 5.0
+        self._backoff_until = 0.0
+
     def _poll(self) -> Optional[dict]:
-        data = yf.download(
-            tickers=self.symbols,
-            period="1d",
-            interval="1m",
-            group_by="ticker",
-            auto_adjust=True,
-            progress=False,
-            threads=True,
-        )
+        if self.is_rate_limited():
+            return None  # Skip poll, return stale
+
+        try:
+            data = yf.download(
+                tickers=self.symbols,
+                period="1d",
+                interval="1m",
+                group_by="ticker",
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+            )
+        except Exception as e:
+            if "429" in str(e) or "Too Many" in str(e):
+                self._mark_rate_limited()
+            return None
+
         if data is None or data.empty:
             return None
 
@@ -133,6 +158,7 @@ class YahooFinanceProvider:
         high_counts = wall_clock_counts(self._high_timestamps)
         low_counts  = wall_clock_counts(self._low_timestamps)
 
+        self._reset_backoff()
         return {
             "newHighs": new_highs,
             "newLows": new_lows,

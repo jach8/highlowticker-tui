@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -96,3 +97,37 @@ def test_output_shape_matches_highlow_update_contract():
     for tf in ("30s", "1m", "5m", "20m"):
         assert tf in result["highCounts"]
         assert tf in result["lowCounts"]
+
+
+def test_backoff_state_initialized():
+    """Provider starts with clean backoff state."""
+    provider = YahooFinanceProvider(SYMBOLS, poll_interval=90)
+    assert provider._backoff_until == 0
+    assert provider._backoff_secs == 5
+
+
+def test_mark_rate_limited_sets_backoff():
+    provider = YahooFinanceProvider(SYMBOLS, poll_interval=90)
+    before = time.time()
+    provider._mark_rate_limited()
+    assert provider._backoff_until > before
+    assert provider._backoff_secs == 10  # doubled from 5
+
+
+def test_mark_rate_limited_caps_at_60s():
+    provider = YahooFinanceProvider(SYMBOLS, poll_interval=90)
+    provider._backoff_secs = 32  # one step below cap
+    provider._mark_rate_limited()
+    assert provider._backoff_secs == 60  # capped
+
+
+def test_is_rate_limited_returns_false_when_expired():
+    provider = YahooFinanceProvider(SYMBOLS, poll_interval=90)
+    provider._backoff_until = time.time() - 1  # expired
+    assert provider.is_rate_limited() is False
+
+
+def test_is_rate_limited_returns_true_when_active():
+    provider = YahooFinanceProvider(SYMBOLS, poll_interval=90)
+    provider._backoff_until = time.time() + 30
+    assert provider.is_rate_limited() is True
