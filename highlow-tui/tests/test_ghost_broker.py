@@ -5,7 +5,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 import asyncio
 import tempfile
-from pathlib import Path as PPath
 from brokers.ghost_broker import GhostBroker
 
 

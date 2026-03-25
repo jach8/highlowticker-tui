@@ -89,15 +89,32 @@ class GhostBroker(BrokerBase):
         ).fetchall()
         return [
             Position(symbol=r[0], direction=r[1], entry_price=r[2],
-                     qty=r[3], current_price=r[2])
+                     qty=r[3], current_price=r[2])  # paper broker: current_price = entry_price (no live feed)
             for r in rows
         ]
 
     async def flatten_all(self) -> FlattenResult:
-        row = self._conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(qty * entry_price), 0) FROM positions"
-        ).fetchone()
-        count, exposure = row[0], row[1]
+        rows = self._conn.execute(
+            "SELECT id, symbol, direction, entry_price, qty, entry_time, "
+            "score_at_entry, label_at_entry "
+            "FROM positions"
+        ).fetchall()
+        count = len(rows)
+        exposure = sum(r[3] * r[4] for r in rows)  # entry_price * qty
+        now = time.time()
+        for pos_id, symbol, direction, entry_price, qty, entry_time, score, label in rows:
+            # Record as a flat exit (PnL=0, exit at entry price — no live feed)
+            self._conn.execute(
+                "INSERT INTO trades "
+                "(symbol, direction, entry_price, exit_price, qty, pnl, "
+                "entry_time, exit_time, duration_secs, exit_reason, "
+                "score_at_entry, label_at_entry, slippage_pct) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (symbol, direction, entry_price, entry_price, qty,
+                 0.0, entry_time, now, now - entry_time, "FLATTEN",
+                 score, label, 0.0),
+            )
+            self._update_stats(0.0)
         self._conn.execute("DELETE FROM positions")
         self._conn.commit()
         return FlattenResult(
@@ -183,7 +200,7 @@ class GhostBroker(BrokerBase):
         equity, total, wins, gp, gl, maxdd = row
         win_rate = (wins / total * 100) if total > 0 else 0.0
         losses = total - wins
-        profit_factor = (gp / abs(gl)) if gl != 0 and losses > 0 else 0.0
+        profit_factor = (gp / abs(gl)) if gl != 0 and losses > 0 else (float("inf") if wins > 0 else 0.0)
         return {
             "equity": equity,
             "total_trades": total,
@@ -240,3 +257,4 @@ class GhostBroker(BrokerBase):
             "peak_equity=?, updated_at=? WHERE id=1",
             (equity, total, wins, gp, gl, drawdown, peak, time.time()),
         )
+        self._conn.commit()
