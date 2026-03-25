@@ -493,10 +493,12 @@ class HighLowTUI(App):
         self,
         equity_provider=None,
         crypto_provider=None,
+        license_banner: str = "",
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self._license_banner = license_banner
         self._equity_provider = equity_provider
         self._crypto_provider = crypto_provider
         self._active_mode = "crypto" if crypto_provider and not equity_provider else "equity"
@@ -931,5 +933,449 @@ def _load_crypto_symbols() -> list[str]:
         return ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD"]
 
 
+class DataCoordinator:
+    """Thin async wrapper around any provider that has a .stream() async-generator.
+
+    Yields raw dicts from the provider unchanged so callers can filter by type.
+    """
+
+    def __init__(self, provider, symbols: list) -> None:
+        self._provider = provider
+        self._symbols = list(symbols)
+
+    async def stream(self):
+        """Async-iterate over provider events, yielding each dict."""
+        await self._provider.connect()
+        async for event in self._provider.stream():
+            yield event
+
+
+# ── GhostPanel widget ────────────────────────────────────────────────────────
+
+class GhostPanel(Widget):
+    """Collapsible sidebar showing ghost trading performance metrics."""
+
+    def compose(self) -> ComposeResult:
+        yield Static("═ GHOST ENGINE ═", classes="ghost-title")
+        yield Static("", id="ghost-equity")
+        yield Static("", id="ghost-winrate")
+        yield Static("", id="ghost-trades")
+        yield Static("", id="ghost-curve")
+
+    def refresh_stats(self, stats: dict, equity_curve: list) -> None:
+        """equity_curve: list of last 20 equity values after closed trades."""
+        if not stats:
+            return
+        from core.sparkline import sparkline as _spark
+        from collections import deque
+
+        equity = stats.get("equity", 100_000)
+        start = 100_000.0
+        change_pct = (equity - start) / start * 100
+        sign = "+" if change_pct >= 0 else ""
+
+        self.query_one("#ghost-equity").update(
+            f"Equity  ${equity:,.0f}  {sign}{change_pct:.2f}%"
+        )
+        win_rate = stats.get("win_rate", 0)
+        pf = stats.get("profit_factor", 0)
+        pf_str = f"{pf:.2f}" if isinstance(pf, float) and pf < 100 else "∞"
+        self.query_one("#ghost-winrate").update(
+            f"WinRate {win_rate:.1f}%  PF {pf_str}"
+        )
+        total = stats.get("total_trades", 0)
+        maxdd = stats.get("max_drawdown_pct", 0)
+        self.query_one("#ghost-trades").update(
+            f"Trades {total}  MaxDD -{maxdd:.1f}%"
+        )
+        if equity_curve:
+            self.query_one("#ghost-curve").update(_spark(deque(equity_curve, maxlen=20)))
+
+
+# ── SovereignApp — main application ─────────────────────────────────────────
+
+class SovereignApp(App):
+    CSS = """
+    /* ── Global ─────────────────────────── */
+    Screen { background: #0d1117; color: #c9d1d9; }
+
+    /* ── Pulse bar ───────────────────────── */
+    #pulse-bar { height: 1; background: #0d1117; border-bottom: tall #21262d; }
+
+    /* ── Command bar ─────────────────────── */
+    #cmd-bar { height: 3; background: #161b22; border-bottom: tall #f0b429; }
+    #cmd-bar.hidden { display: none; }
+    .cmd-prompt { color: #f0b429; width: 8; }
+    .cmd-input Input { background: transparent; border: none; color: #f0b429; }
+    .cmd-hint { color: #484f58; width: 1fr; text-align: right; }
+
+    /* ── Breadth bar ─────────────────────── */
+    #breadth-bar { height: 1; background: #0d1117; border-bottom: tall #21262d; }
+
+    /* ── Tables ──────────────────────────── */
+    #tables-row { height: 1fr; }
+    #lows-panel, #highs-panel { width: 1fr; }
+    #lows-panel { border-right: tall #21262d; }
+    .panel-header { height: 1; }
+    .panel-header.highs { color: #3fb950; background: rgba(63,185,80,0.04); }
+    .panel-header.lows  { color: #f85149; background: rgba(248,81,73,0.04); }
+    .col-headers { height: 1; background: #161b22; color: #484f58; }
+
+    /* ── Grid rows ───────────────────────── */
+    GridRow { height: 1; }
+    GridRow:hover { background: rgba(88,166,255,0.07); }
+    GridRow.cursor-row { background: rgba(88,166,255,0.15); }
+
+    /* Column widths */
+    .col-sym   { width: 9;  }
+    .col-cnt   { width: 4;  }
+    .col-price { width: 10; }
+    .col-trend { width: 8;  }
+    .col-pct   { width: 7;  }
+    .col-rsi   { width: 5;  }
+    .col-vwap  { width: 7;  }
+    .col-spark { width: 22; }
+    .col-pilot { width: 1fr; }
+
+    /* ── Heatmap velocity tints ──────────── */
+    GridRow.heat-5  { background: rgba(63,185,80,0.22);  transition: background 400ms linear; }
+    GridRow.heat-4  { background: rgba(63,185,80,0.13);  transition: background 400ms linear; }
+    GridRow.heat-3  { background: rgba(63,185,80,0.06);  transition: background 400ms linear; }
+    GridRow.heat-0  { background: transparent;           transition: background 400ms linear; }
+    GridRow.heat-n3 { background: rgba(248,81,73,0.06);  transition: background 400ms linear; }
+    GridRow.heat-n4 { background: rgba(248,81,73,0.13);  transition: background 400ms linear; }
+    GridRow.heat-n5 { background: rgba(248,81,73,0.22);  transition: background 400ms linear; }
+
+    /* ── Status bar ──────────────────────── */
+    #status-bar { height: 1; background: #161b22; border-top: tall #21262d; }
+
+    /* ── Ghost panel ─────────────────────── */
+    #ghost-panel { width: 34; background: #161b22; border-left: tall #30363d; }
+    #ghost-panel.hidden { display: none; }
+
+    /* ── Kill modal ──────────────────────── */
+    KillModal { align: center middle; }
+    .kill-box { width: 60; background: #161b22; border: tall #f85149; padding: 1 2; }
+    .kill-title { color: #f85149; text-align: center; text-style: bold; }
+    .kill-hint { color: #8b949e; }
+    #kill-confirm-btn { margin-top: 1; }
+    """
+
+    BINDINGS = [
+        ("j",       "nav_down",     "Down"),
+        ("k",       "nav_up",       "Up"),
+        ("enter",   "drill_down",   "Detail"),
+        ("m",       "toggle_mode",  "Mode"),
+        ("p",       "toggle_ghost", "Ghost"),
+        ("r",       "reload_cfg",   "Reload"),
+        ("shift+k", "kill_switch",  "FLATTEN ALL"),
+        ("q",       "quit",         "Quit"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets import Header, Footer
+        yield Header()
+        yield Static("", id="pulse-bar")
+        yield CommandBar(
+            on_add=self._add_ticker,
+            on_search=self._filter_rows,
+            on_command=self._handle_command,
+            id="cmd-bar",
+        )
+        yield Static("", id="breadth-bar")
+        with Horizontal(id="tables-row"):
+            with Vertical(id="lows-panel"):
+                yield Static("▼ SESSION LOWS", id="lows-header",
+                             classes="panel-header lows")
+                yield Static(
+                    " SYM      CNT PRICE      TREND    %CHG   RSI  VWAP△  "
+                    "SPARKLINE             CO-PILOT",
+                    classes="col-headers",
+                )
+                yield CellGrid("low", id="lows-grid")
+            with Vertical(id="highs-panel"):
+                yield Static("▲ SESSION HIGHS", id="highs-header",
+                             classes="panel-header highs")
+                yield Static(
+                    " SYM      CNT PRICE      TREND    %CHG   RSI  VWAP△  "
+                    "SPARKLINE             CO-PILOT",
+                    classes="col-headers",
+                )
+                yield CellGrid("high", id="highs-grid")
+            with Vertical(id="ghost-panel", classes="hidden"):
+                yield GhostPanel(id="ghost-widget")
+        yield Static("", id="status-bar")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        from core.state_store import CentralStateStore
+        from core.copilot import CopilotEngine
+        from core.symbol_monitor import SymbolMonitor
+        from brokers.ghost_broker import GhostBroker
+
+        self._store = CentralStateStore.get()
+        self._copilot = CopilotEngine()
+        self._monitor = SymbolMonitor()
+        self._broker = GhostBroker()
+        self._active_focus = "high"
+        self._modal_open = False
+
+        # Load symbols using the existing _load_symbols() function from the original app
+        # If _load_symbols doesn't exist, use a default list
+        try:
+            symbols = _load_symbols()
+        except NameError:
+            symbols = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA"]
+
+        for sym in symbols:
+            self._store.add_symbol(sym)
+
+        # Use the existing DataCoordinator from the same app.py file
+        try:
+            from providers.yahoo_provider import YahooFinanceProvider
+            provider = YahooFinanceProvider(symbols, poll_interval=90)
+            self._coordinator = DataCoordinator(provider, symbols)
+            self.run_worker(self._feed_loop(), exclusive=True, name="feed")
+        except Exception as e:
+            self.notify(f"Provider error: {e}", severity="warning")
+            self._coordinator = None
+
+        self.set_interval(5, self._baseline_tick)
+        self.set_interval(1, self._tape_tick)
+        self.set_interval(10, self._refresh_ghost)
+
+    async def _feed_loop(self) -> None:
+        """Main async loop: pull from coordinator → update store → refresh UI."""
+        from core.sparkline import sparkline
+        import time
+
+        if self._coordinator is None:
+            return
+
+        async for update in self._coordinator.stream():
+            if update.get("type") != "HIGHLOW_UPDATE":
+                continue
+
+            data = update.get("data", {})
+            spy_state = self._store.get_symbol("SPY")
+
+            for sym, entry in data.get("newHighs", {}).items():
+                state = self._store.update_price(
+                    sym, entry["price"], entry.get("volume", 0)
+                )
+                self._store.increment_count(sym)
+                self._monitor.evaluate(sym)
+                state.copilot_score, state.copilot_label = \
+                    self._copilot.score(state, spy_state)
+                await self._maybe_ghost_enter(sym, state)
+                await self._broker.check_exits(sym, state.price)
+                self._push_row("high", sym, state)
+
+            for sym, entry in data.get("newLows", {}).items():
+                state = self._store.update_price(
+                    sym, entry["price"], entry.get("volume", 0)
+                )
+                self._store.increment_count(sym)
+                self._monitor.evaluate(sym)
+                state.copilot_score, state.copilot_label = \
+                    self._copilot.score(state, spy_state)
+                await self._broker.check_exits(sym, state.price)
+                self._push_row("low", sym, state)
+
+            self._refresh_pulse(data)
+            self._refresh_breadth()
+            self._refresh_status()
+
+    def _push_row(self, side: str, symbol: str, state) -> None:
+        from core.sparkline import sparkline as _spark
+
+        grid_id = "highs-grid" if side == "high" else "lows-grid"
+        grid = self.query_one(f"#{grid_id}", CellGrid)
+
+        trend_char = "▲" if side == "high" else "▼"
+        trend = trend_char * min(state.count, 7)
+
+        rsi_str = f"{state.rsi:.0f}" if state.rsi is not None else "—"
+        vwap_str = (
+            f"{(state.price - state.vwap) / state.vwap * 100:+.1f}%"
+            if state.vwap else "—"
+        )
+        sym_str = f"{'⚡' if state.is_turbo else ''}{symbol}"
+
+        grid.update_row(symbol, {
+            "sym":     sym_str,
+            "cnt":     str(state.count),
+            "price":   f"{state.price:.2f}",
+            "trend":   trend,
+            "pct":     f"{state.pct_change:+.2f}%",
+            "rsi":     rsi_str,
+            "vwap":    vwap_str,
+            "spark":   _spark(state.price_history),
+            "pilot":   state.copilot_label,
+            "velocity": state.price_velocity_5m,
+        })
+
+    def _refresh_pulse(self, data: dict) -> None:
+        index_symbols = ["SPY", "QQQ", "IWM", "BTC-USD"]
+        parts = []
+        for sym in index_symbols:
+            state = self._store.get_symbol(sym)
+            if state and state.price > 0:
+                sign = "▲" if state.pct_change >= 0 else "▼"
+                parts.append(
+                    f"{sym.replace('-USD','')} {state.price:.2f} "
+                    f"{sign}{abs(state.pct_change):.2f}%"
+                )
+        self.query_one("#pulse-bar").update("  ".join(parts))
+
+    def _refresh_breadth(self) -> None:
+        symbols = self._store.all_symbols()
+        if not symbols:
+            return
+        advances = sum(
+            1 for s in symbols
+            if (st := self._store.get_symbol(s)) and st.pct_change > 0
+        )
+        declines = sum(
+            1 for s in symbols
+            if (st := self._store.get_symbol(s)) and st.pct_change < 0
+        )
+        total = len(symbols)
+        ratio = advances / total if total else 0.5
+        mood = "RISK-ON" if ratio > 0.6 else ("RISK-OFF" if ratio < 0.4 else "NEUTRAL")
+        bar_width = 30
+        fill = int(ratio * bar_width)
+        bar = "█" * fill + "░" * (bar_width - fill)
+        self.query_one("#breadth-bar").update(
+            f" BREADTH [{bar}] ↑{advances} / ↓{declines}  {mood}"
+        )
+
+    def _refresh_status(self) -> None:
+        import time
+        symbols = self._store.all_symbols()
+        statuses = [
+            self._store.get_symbol(s).last_fetch_status
+            for s in symbols[:5] if self._store.get_symbol(s)
+        ]
+        conn = "● LIVE" if all(s == "OK" for s in statuses) else "⚠ DEGRADED"
+        self.query_one("#status-bar").update(
+            f" {conn}  SYMBOLS {len(symbols)}  "
+            f"j/k nav  dd del  b/s order  m mode  p ghost  ⇧K FLATTEN ALL"
+        )
+
+    def _refresh_ghost(self) -> None:
+        try:
+            stats = self._broker.get_stats()
+            rows = self._broker._conn.execute(
+                "SELECT pnl FROM trades ORDER BY exit_time DESC LIMIT 20"
+            ).fetchall()
+            # Build running equity from current equity backwards
+            current_equity = stats.get("equity", 100_000)
+            equity_curve = []
+            running = current_equity
+            for (pnl,) in reversed(rows):
+                equity_curve.insert(0, running)
+                running -= pnl
+            panel = self.query_one("#ghost-widget", GhostPanel)
+            panel.refresh_stats(stats, equity_curve)
+        except Exception:
+            pass
+
+    def _baseline_tick(self) -> None:
+        self._monitor.take_baseline_snapshot()
+        self._monitor._clear_expired()
+
+    def _tape_tick(self) -> None:
+        self._refresh_status()
+
+    def on_key(self, event) -> None:
+        if self._modal_open:
+            return
+        cmd = self.query_one("#cmd-bar", CommandBar)
+        try:
+            inp = cmd.query_one(Input)
+            if event.is_printable and not inp.has_focus:
+                cmd.open(event.character)
+                event.stop()
+        except Exception:
+            pass
+
+    def action_nav_down(self) -> None:
+        self._active_grid().move_cursor(1)
+
+    def action_nav_up(self) -> None:
+        self._active_grid().move_cursor(-1)
+
+    def action_delete_row(self) -> None:
+        sym = self._active_grid().selected_symbol()
+        if sym:
+            self._active_grid().remove_row(sym)
+            self._store.remove_symbol(sym)
+
+    def action_kill_switch(self) -> None:
+        async def _do_flatten():
+            result = await self._broker.flatten_all()
+            self.notify(
+                f"⚠ FLATTEN ALL EXECUTED — {result.positions_closed} positions closed",
+                severity="error", timeout=10,
+            )
+
+        async def _confirm():
+            self._modal_open = False
+            await _do_flatten()
+
+        async def _open_modal():
+            positions = await self._broker.get_positions()
+            self._modal_open = True
+            self.push_screen(
+                KillModal(positions=positions,
+                          on_confirm=lambda: self.run_worker(_confirm()))
+            )
+
+        self.run_worker(_open_modal())
+
+    def action_toggle_ghost(self) -> None:
+        panel = self.query_one("#ghost-panel")
+        panel.toggle_class("hidden")
+
+    def action_drill_down(self) -> None:
+        sym = self._active_grid().selected_symbol()
+        if sym:
+            self.notify(f"Detail: {sym}")
+
+    def action_toggle_mode(self) -> None:
+        self._active_focus = "low" if self._active_focus == "high" else "high"
+        self.notify(f"Focus: {self._active_focus.upper()}")
+
+    def action_reload_cfg(self) -> None:
+        self.notify("Config reloaded")
+
+    def _active_grid(self) -> CellGrid:
+        grid_id = "highs-grid" if self._active_focus == "high" else "lows-grid"
+        return self.query_one(f"#{grid_id}", CellGrid)
+
+    async def _maybe_ghost_enter(self, symbol: str, state) -> None:
+        if state.copilot_score >= 6.0:
+            await self._broker.enter_long(
+                symbol, state.price, state.copilot_score, state.copilot_label
+            )
+
+    def _add_ticker(self, ticker: str) -> None:
+        self._store.add_symbol(ticker)
+        self.notify(f"Added {ticker} to watchlist")
+
+    def _filter_rows(self, query: str) -> None:
+        for grid in self.query(CellGrid):
+            for sym, row in grid._rows.items():
+                row.display = query in sym.lower()
+
+    def _handle_command(self, cmd: str) -> None:
+        if cmd == "dd":
+            self.action_delete_row()
+        elif cmd.startswith("mode "):
+            mode = cmd.split(" ", 1)[1]
+            self.notify(f"Mode: {mode}")
+
+
 if __name__ == "__main__":
-    main()
+    SovereignApp().run()
