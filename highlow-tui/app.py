@@ -21,8 +21,10 @@ sys.path.insert(0, str(_ROOT / 'core'))
 from dataclasses import dataclass, field
 
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Static, Header, Footer, Button
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import DataTable, Static, Header, Footer, Button, Input
+from textual.reactive import reactive
+from textual.widget import Widget
 from textual.screen import Screen
 from rich.text import Text
 from rich.style import Style
@@ -134,6 +136,181 @@ class SessionState:
     prev_entries_lows:  dict = field(default_factory=dict)
     week52_highs: set = field(default_factory=set)
     week52_lows:  set = field(default_factory=set)
+
+
+# ── Cell widget subclasses ────────────────────────────────────────────────────
+# IMPORTANT: reactive() must be declared at the class level, not on instances.
+# Textual only calls watch_* when the value actually changes (always_update=False).
+
+class _Cell(Static):
+    """Base cell — all cells are strings pre-formatted before assignment."""
+    value: reactive[str] = reactive("—", layout=False)
+
+    def watch_value(self, new: str) -> None:
+        self.update(new)
+
+
+class SymCell(_Cell):
+    """Symbol + optional badge (⚡ turbo, 52W high/low marker)."""
+    pass
+
+
+class CntCell(_Cell):
+    """Hit count."""
+    pass
+
+
+class PriceCell(_Cell):
+    """Current price."""
+    pass
+
+
+class TrendCell(_Cell):
+    """Trend arrows (▲▲▲ or ▼▼▼)."""
+    pass
+
+
+class PctCell(_Cell):
+    """Percent change."""
+    pass
+
+
+class RsiCell(_Cell):
+    """RSI value or '—' during warmup."""
+    pass
+
+
+class VwapDeltaCell(_Cell):
+    """Price delta vs VWAP."""
+    pass
+
+
+class SparkCell(_Cell):
+    """20-bar Unicode sparkline."""
+    pass
+
+
+class CopilotCell(_Cell):
+    """Co-Pilot score label."""
+    pass
+
+
+class GridRow(Horizontal):
+    """One row in the CellGrid — holds all Cell widgets for one symbol."""
+
+    HEAT_CLASSES = {
+        "heat-5", "heat-4", "heat-3", "heat-0",
+        "heat-n3", "heat-n4", "heat-n5"
+    }
+
+    def __init__(self, symbol: str, side: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.symbol = symbol
+        self.side = side  # "high" | "low"
+        self._current_heat = "heat-0"
+        self.cells: dict[str, _Cell] = {}
+
+    def compose(self) -> ComposeResult:
+        yield SymCell("—",       classes="col-sym",   id=f"{self.symbol}-sym-{self.side}")
+        yield CntCell("—",       classes="col-cnt",   id=f"{self.symbol}-cnt-{self.side}")
+        yield PriceCell("—",     classes="col-price", id=f"{self.symbol}-price-{self.side}")
+        yield TrendCell("—",     classes="col-trend", id=f"{self.symbol}-trend-{self.side}")
+        yield PctCell("—",       classes="col-pct",   id=f"{self.symbol}-pct-{self.side}")
+        yield RsiCell("—",       classes="col-rsi",   id=f"{self.symbol}-rsi-{self.side}")
+        yield VwapDeltaCell("—", classes="col-vwap",  id=f"{self.symbol}-vwap-{self.side}")
+        yield SparkCell("—",     classes="col-spark", id=f"{self.symbol}-spark-{self.side}")
+        yield CopilotCell("—",   classes="col-pilot", id=f"{self.symbol}-pilot-{self.side}")
+
+    def on_mount(self) -> None:
+        self.cells = {
+            "sym":   self.query_one(SymCell),
+            "cnt":   self.query_one(CntCell),
+            "price": self.query_one(PriceCell),
+            "trend": self.query_one(TrendCell),
+            "pct":   self.query_one(PctCell),
+            "rsi":   self.query_one(RsiCell),
+            "vwap":  self.query_one(VwapDeltaCell),
+            "spark": self.query_one(SparkCell),
+            "pilot": self.query_one(CopilotCell),
+        }
+
+    def set_heat(self, velocity_pct: float) -> None:
+        """Set row background heat class based on 5-min price velocity."""
+        if velocity_pct > 1.5:
+            new_heat = "heat-5"
+        elif velocity_pct > 0.8:
+            new_heat = "heat-4"
+        elif velocity_pct > 0.3:
+            new_heat = "heat-3"
+        elif velocity_pct < -1.5:
+            new_heat = "heat-n5"
+        elif velocity_pct < -0.8:
+            new_heat = "heat-n4"
+        elif velocity_pct < -0.3:
+            new_heat = "heat-n3"
+        else:
+            new_heat = "heat-0"
+
+        if new_heat != self._current_heat:
+            self.remove_class(self._current_heat)
+            self.add_class(new_heat)
+            self._current_heat = new_heat
+
+
+class CellGrid(VerticalScroll):
+    """Zero-flicker reactive grid. Only dirty cells repaint."""
+
+    def __init__(self, side: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.side = side  # "high" | "low"
+        self._rows: dict[str, GridRow] = {}
+        self._cursor_idx: int = 0
+        self._symbol_order: list[str] = []
+
+    def add_row(self, symbol: str) -> GridRow:
+        if symbol not in self._rows:
+            row = GridRow(symbol, self.side, id=f"row-{symbol}-{self.side}")
+            self._rows[symbol] = row
+            self._symbol_order.append(symbol)
+            self.mount(row)
+        return self._rows[symbol]
+
+    def remove_row(self, symbol: str) -> None:
+        row = self._rows.pop(symbol, None)
+        if row:
+            self._symbol_order.remove(symbol)
+            row.remove()
+
+    def update_row(self, symbol: str, data: dict) -> None:
+        """Diff-update only the cells whose values changed."""
+        row = self._rows.get(symbol)
+        if row is None:
+            row = self.add_row(symbol)
+        for col, new_val in data.items():
+            cell = row.cells.get(col)
+            if cell and cell.value != new_val:
+                cell.value = new_val
+        if "velocity" in data:
+            row.set_heat(data["velocity"])
+
+    def move_cursor(self, delta: int) -> None:
+        if not self._symbol_order:
+            return
+        self._cursor_idx = max(
+            0, min(self._cursor_idx + delta, len(self._symbol_order) - 1)
+        )
+        sym = self._symbol_order[self._cursor_idx]
+        row = self._rows.get(sym)
+        if row:
+            row.scroll_visible()
+            for r in self._rows.values():
+                r.remove_class("cursor-row")
+            row.add_class("cursor-row")
+
+    def selected_symbol(self) -> "str | None":
+        if not self._symbol_order:
+            return None
+        return self._symbol_order[self._cursor_idx]
 
 
 class HighLowTUI(App):
