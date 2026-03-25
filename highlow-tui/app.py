@@ -974,19 +974,30 @@ class GhostPanel(Widget):
         change_pct = (equity - start) / start * 100
         sign = "+" if change_pct >= 0 else ""
 
+        if equity > start:
+            indicator = "[green]▲[/green]"
+            eq_color = "green"
+        elif equity < start:
+            indicator = "[red]▼[/red]"
+            eq_color = "red"
+        else:
+            indicator = "[dim]—[/dim]"
+            eq_color = "dim"
+
         self.query_one("#ghost-equity").update(
-            f"Equity  ${equity:,.0f}  {sign}{change_pct:.2f}%"
+            f"{indicator} [{eq_color}]${equity:,.0f}[/{eq_color}]  "
+            f"[{eq_color}]{sign}{change_pct:.2f}%[/{eq_color}]"
         )
         win_rate = stats.get("win_rate", 0)
         pf = stats.get("profit_factor", 0)
         pf_str = f"{pf:.2f}" if isinstance(pf, float) and pf < 100 else "∞"
         self.query_one("#ghost-winrate").update(
-            f"WinRate {win_rate:.1f}%  PF {pf_str}"
+            f"[bold]Win Rate[/bold]  {win_rate:.1f}%  [dim]|[/dim]  PF  {pf_str}"
         )
         total = stats.get("total_trades", 0)
         maxdd = stats.get("max_drawdown_pct", 0)
         self.query_one("#ghost-trades").update(
-            f"Trades {total}  MaxDD -{maxdd:.1f}%"
+            f"Trades  {total}  [dim]|[/dim]  MaxDD  [red]-{maxdd:.1f}%[/red]"
         )
         if equity_curve:
             self.query_one("#ghost-curve").update(_spark(deque(equity_curve, maxlen=20)))
@@ -1071,6 +1082,9 @@ class SovereignApp(App):
         ("shift+k", "kill_switch",  "FLATTEN ALL"),
         ("q",       "quit",         "Quit"),
     ]
+
+    _pulse_tick: int = 0
+    _PULSE_DOTS = ["●", "○", "·", "○"]
 
     def compose(self) -> ComposeResult:
         from textual.widgets import Header, Footer
@@ -1232,7 +1246,9 @@ class SovereignApp(App):
                     f"{sym.replace('-USD','')} {state.price:.2f} "
                     f"{sign}{abs(state.pct_change):.2f}%"
                 )
-        self.query_one("#pulse-bar").update("  ".join(parts))
+        dot = self._PULSE_DOTS[self._pulse_tick % len(self._PULSE_DOTS)]
+        self._pulse_tick += 1
+        self.query_one("#pulse-bar").update(f"{dot} " + "  ".join(parts))
 
     def _refresh_breadth(self) -> None:
         symbols = self._store.all_symbols()
@@ -1252,8 +1268,9 @@ class SovereignApp(App):
         bar_width = 30
         fill = int(ratio * bar_width)
         bar = "█" * fill + "░" * (bar_width - fill)
+        dot = self._PULSE_DOTS[self._pulse_tick % len(self._PULSE_DOTS)]
         self.query_one("#breadth-bar").update(
-            f" BREADTH [{bar}] ↑{advances} / ↓{declines}  {mood}"
+            f" BREADTH [{bar}] ↑{advances} / ↓{declines}  {mood}  {dot}"
         )
 
     def _refresh_status(self) -> None:
@@ -1263,10 +1280,15 @@ class SovereignApp(App):
             self._store.get_symbol(s).last_fetch_status
             for s in symbols[:5] if self._store.get_symbol(s)
         ]
+        turbo_count = sum(
+            1 for s in symbols
+            if (st := self._store.get_symbol(s)) and st.is_turbo
+        )
+        turbo_str = f" ⚡{turbo_count}" if turbo_count else ""
         conn = "● LIVE" if all(s == "OK" for s in statuses) else "⚠ DEGRADED"
         self.query_one("#status-bar").update(
-            f" {conn}  SYMBOLS {len(symbols)}  "
-            f"j/k nav  dd del  b/s order  m mode  p ghost  ⇧K FLATTEN ALL"
+            f" {conn}{turbo_str}  SYMBOLS {len(symbols)}  "
+            f"j/k nav  dd del  m mode  p ghost  ⇧K FLATTEN"
         )
 
     def _refresh_ghost(self) -> None:
