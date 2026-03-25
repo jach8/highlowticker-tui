@@ -212,6 +212,24 @@ class GhostBroker(BrokerBase):
             "gross_loss": gl,
         }
 
+    def get_equity_curve(self, n: int = 20) -> list[float]:
+        """Return last n equity snapshots reconstructed from closed trades."""
+        rows = self._conn.execute(
+            "SELECT pnl FROM trades ORDER BY exit_time DESC LIMIT ?", (n,)
+        ).fetchall()
+        if not rows:
+            return []
+        stats_row = self._conn.execute(
+            "SELECT equity FROM stats WHERE id=1"
+        ).fetchone()
+        current_equity = stats_row[0] if stats_row else 100_000.0
+        equity_curve = []
+        running = current_equity
+        for (pnl,) in reversed(rows):
+            equity_curve.insert(0, running)
+            running -= pnl
+        return equity_curve
+
     def close(self) -> None:
         self._conn.close()
 

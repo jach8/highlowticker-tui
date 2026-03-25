@@ -1159,10 +1159,15 @@ class SovereignApp(App):
             data = update.get("data", {})
             spy_state = self._store.get_symbol("SPY")
 
-            for sym, entry in data.get("newHighs", {}).items():
-                state = self._store.update_price(
-                    sym, entry["price"], entry.get("volume", 0)
-                )
+            # newHighs/newLows are {symbol: count} dicts; prices in lastHigh/lastLow
+            last_highs = data.get("lastHigh", {})
+            last_lows = data.get("lastLow", {})
+
+            for sym in data.get("newHighs", {}).keys():
+                price = last_highs.get(sym, 0.0)
+                if not price:
+                    continue
+                state = self._store.update_price(sym, float(price))
                 self._store.increment_count(sym)
                 self._monitor.evaluate(sym)
                 state.copilot_score, state.copilot_label = \
@@ -1171,10 +1176,11 @@ class SovereignApp(App):
                 await self._broker.check_exits(sym, state.price)
                 self._push_row("high", sym, state)
 
-            for sym, entry in data.get("newLows", {}).items():
-                state = self._store.update_price(
-                    sym, entry["price"], entry.get("volume", 0)
-                )
+            for sym in data.get("newLows", {}).keys():
+                price = last_lows.get(sym, 0.0)
+                if not price:
+                    continue
+                state = self._store.update_price(sym, float(price))
                 self._store.increment_count(sym)
                 self._monitor.evaluate(sym)
                 state.copilot_score, state.copilot_label = \
@@ -1266,16 +1272,7 @@ class SovereignApp(App):
     def _refresh_ghost(self) -> None:
         try:
             stats = self._broker.get_stats()
-            rows = self._broker._conn.execute(
-                "SELECT pnl FROM trades ORDER BY exit_time DESC LIMIT 20"
-            ).fetchall()
-            # Build running equity from current equity backwards
-            current_equity = stats.get("equity", 100_000)
-            equity_curve = []
-            running = current_equity
-            for (pnl,) in reversed(rows):
-                equity_curve.insert(0, running)
-                running -= pnl
+            equity_curve = self._broker.get_equity_curve()
             panel = self.query_one("#ghost-widget", GhostPanel)
             panel.refresh_stats(stats, equity_curve)
         except Exception:
@@ -1283,7 +1280,7 @@ class SovereignApp(App):
 
     def _baseline_tick(self) -> None:
         self._monitor.take_baseline_snapshot()
-        self._monitor._clear_expired()
+        self._monitor.clear_expired()
 
     def _tape_tick(self) -> None:
         self._refresh_status()
@@ -1355,7 +1352,12 @@ class SovereignApp(App):
         return self.query_one(f"#{grid_id}", CellGrid)
 
     async def _maybe_ghost_enter(self, symbol: str, state) -> None:
+        """Auto-enter ghost position on high Co-Pilot scores (one position per symbol)."""
         if state.copilot_score >= 6.0:
+            # Guard: only one open position per symbol
+            existing = await self._broker.get_positions()
+            if any(p.symbol == symbol for p in existing):
+                return
             await self._broker.enter_long(
                 symbol, state.price, state.copilot_score, state.copilot_label
             )

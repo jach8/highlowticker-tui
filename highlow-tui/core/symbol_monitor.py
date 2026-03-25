@@ -51,7 +51,7 @@ class SymbolMonitor:
 
         return triggered
 
-    def _clear_expired(self) -> None:
+    def clear_expired(self) -> None:
         """Clear turbo flags for symbols whose timer has elapsed."""
         store = CentralStateStore.get()
         now = time.time()

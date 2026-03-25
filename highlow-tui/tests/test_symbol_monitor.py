@@ -79,7 +79,7 @@ def test_turbo_expires_after_time():
     # Manually expire
     state.turbo_until = time.time() - 1
     state.prev_price = state.price  # reset so no re-trigger
-    monitor._clear_expired()
+    monitor.clear_expired()
     assert not state.is_turbo
 
 
