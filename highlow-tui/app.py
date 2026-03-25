@@ -25,7 +25,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import DataTable, Static, Header, Footer, Button, Input
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.screen import Screen
+from textual.screen import Screen, ModalScreen
 from rich.text import Text
 from rich.style import Style
 
@@ -375,6 +375,67 @@ class CommandBar(Widget):
         if event.key == "escape":
             self.close()
             event.stop()
+
+
+class KillModal(ModalScreen):
+    """Full-screen flatten-all confirmation.
+    User must type 'CONFIRM' (case-sensitive) to execute.
+    ESC dismisses without action. Auto-dismisses after 60 seconds.
+    """
+
+    AUTO_DISMISS_SECS = 60
+
+    def __init__(self, positions: list, on_confirm, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._positions = positions
+        self._on_confirm = on_confirm
+
+    def compose(self) -> ComposeResult:
+        pos_text = "\n".join(
+            f"  {p.symbol} {p.direction} {p.qty:.2f} @ {p.entry_price:.2f}"
+            for p in self._positions
+        ) or "  (no open positions)"
+
+        yield Vertical(
+            Static("⚠  FLATTEN ALL  ⚠", id="kill-title", classes="kill-title"),
+            Static(f"Open positions:\n{pos_text}", id="kill-pos"),
+            Static("Type CONFIRM to execute. ESC to cancel.", classes="kill-hint"),
+            Input(placeholder="Type CONFIRM", id="kill-input", classes="kill-input"),
+            Button("FLATTEN ALL", id="kill-confirm-btn",
+                   variant="error", disabled=True),
+            Button("Cancel", id="kill-cancel-btn"),
+            id="kill-box",
+            classes="kill-box",
+        )
+
+    def on_mount(self) -> None:
+        self.set_timer(self.AUTO_DISMISS_SECS, self._auto_dismiss)
+        self.query_one("#kill-input", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        btn = self.query_one("#kill-confirm-btn", Button)
+        btn.disabled = (event.value != "CONFIRM")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "kill-confirm-btn":
+            self._execute()
+        elif event.button.id == "kill-cancel-btn":
+            self.dismiss()
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.dismiss()
+            event.stop()
+
+    def _execute(self) -> None:
+        self._on_confirm()
+        self.dismiss()
+
+    def _auto_dismiss(self) -> None:
+        self.app.notify(
+            "Kill switch timed out — no action taken", severity="warning"
+        )
+        self.dismiss()
 
 
 class HighLowTUI(App):
