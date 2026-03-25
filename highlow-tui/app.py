@@ -313,6 +313,70 @@ class CellGrid(VerticalScroll):
         return self._symbol_order[self._cursor_idx]
 
 
+class CommandBar(Widget):
+    """Omnipresent command input. Auto-focused when user types any letter.
+
+    Modes:
+        'add'     — default, adds ticker on Enter
+        'search'  — triggered by '/', filters grid rows
+        'command' — triggered by ':', executes :dd :mode :clear etc.
+    """
+
+    is_open: reactive[bool] = reactive(False, layout=True)
+    mode: reactive[str] = reactive("add")
+
+    def __init__(self, on_add=None, on_search=None, on_command=None, **kwargs):
+        super().__init__(**kwargs)
+        self._on_add = on_add
+        self._on_search = on_search
+        self._on_command = on_command
+
+    def compose(self) -> ComposeResult:
+        yield Static("⌨ ADD ▸", id="cmd-prompt", classes="cmd-prompt")
+        yield Input(placeholder="ticker / /search / :command",
+                    id="cmd-input", classes="cmd-input")
+        yield Static("↵ add · ESC cancel · / search · : cmd",
+                     id="cmd-hint", classes="cmd-hint")
+
+    def open(self, first_char: str = "") -> None:
+        """Focus input and optionally pre-fill first character."""
+        self.is_open = True
+        inp = self.query_one("#cmd-input", Input)
+        self.app.set_focus(inp)
+        if first_char == "/":
+            self.mode = "search"
+            inp.value = ""
+        elif first_char == ":":
+            self.mode = "command"
+            inp.value = ""
+        else:
+            self.mode = "add"
+            inp.value = first_char.upper() if first_char else ""
+
+    def close(self) -> None:
+        self.is_open = False
+        self.mode = "add"
+        self.query_one("#cmd-input", Input).value = ""
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip().upper()
+        if not text:
+            self.close()
+            return
+        if self.mode == "add" and self._on_add:
+            self._on_add(text)
+        elif self.mode == "search" and self._on_search:
+            self._on_search(text.lower())
+        elif self.mode == "command" and self._on_command:
+            self._on_command(text.lower())
+        self.close()
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.close()
+            event.stop()
+
+
 class HighLowTUI(App):
     CSS = """
     Screen {
