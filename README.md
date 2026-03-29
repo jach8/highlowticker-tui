@@ -1,10 +1,8 @@
 # HighLow TUI
 
-Real-time session highs and lows across 571 S&P 500 components, in your terminal.
+Real-time session highs and lows, streaming directly from your broker into your terminal.
 
-Tracks every stock making a new intraday high or low — color-coded by frequency, volume spikes, and % change. Built for 0DTE traders watching the equal-weight tape before it shows up on the index.
-
-![screenshot placeholder]
+Tracks every stock making a new intraday high or low — color-coded by frequency, volume spikes, and % change. Built for active traders, who want a personal 'speedometer' of the market at any given moment.
 
 Live demo: **[highlowtick.com](https://highlowtick.com)**
 
