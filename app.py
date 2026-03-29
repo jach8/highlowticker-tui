@@ -179,6 +179,13 @@ class HighLowTUI(App):
         width: auto;
         padding: 0 2;
     }
+    #upgrade-banner {
+        height: 1;
+        padding: 0 1;
+        text-align: center;
+        color: $warning;
+        background: $warning 15%;
+    }
     """
 
     BINDINGS = [
@@ -240,6 +247,10 @@ class HighLowTUI(App):
                 mode_label = "[bold cyan][Equity][/]  Crypto" if self._active_mode == "equity" else "Equity  [bold cyan][Crypto][/]"
                 yield Static(mode_label, id="mode-toggle")
             yield Static("● connecting", id="connection-status")
+        yield Static(
+            "⚡ Upgrade to [bold]HighlowTicker Pro[/bold] for real-time data from 11+ brokers — [bold]highlowtick.com[/bold]",
+            id="upgrade-banner",
+        )
         yield Static("", id="ticker")
         yield Static(id="rate-bars")
         with Horizontal(id="tables-container"):
